@@ -6,7 +6,6 @@ import torch.distributed
 import numpy as np
 
 from dataclasses import dataclass
-from loguru import logger
 from opentelemetry import trace
 from transformers import PreTrainedTokenizerBase
 from typing import Optional, Tuple, List, Type, Union, Dict
@@ -20,6 +19,7 @@ from text_generation_server.models.types import (
 )
 from text_generation_server.pb import generate_pb2
 from text_generation_server.utils import StoppingCriteria, HeterogeneousNextTokenChooser
+from text_generation_server.utils.dist import MEMORY_FRACTION
 
 tracer = trace.get_tracer(__name__)
 
@@ -39,6 +39,7 @@ class CacheManager:
         device: torch.device,
     ):
         self.block_size = BLOCK_SIZE
+        self.num_blocks = num_blocks
 
         element_size = torch.tensor([], dtype=dtype).element_size()
         x = self.block_size // element_size
@@ -741,13 +742,15 @@ class FlashCausalLM(Model):
         cache_block_size = BLOCK_SIZE * self.num_kv_heads * self.head_size
         total_cache_size = self.num_layers * cache_block_size * 2 * dtype_size
 
-        total_gpu_memory = torch.cuda.get_device_properties(self.device).total_memory
+        total_gpu_memory = (
+            torch.cuda.get_device_properties(self.device).total_memory * MEMORY_FRACTION
+        )
 
         # 0.98 to add some wiggle room
         num_blocks = (
             int((total_gpu_memory * 0.98 - peak_memory) // total_cache_size)
-            # Add batch.blocks as we allocated it above, so it is included in the peak memory.
-            + batch.blocks
+            # Add the current cache manager blocks as we allocated it above, so it is included in the peak memory.
+            + CACHE_MANAGER.num_blocks
         )
 
         del CACHE_MANAGER
